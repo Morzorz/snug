@@ -21,17 +21,30 @@ public struct RemoteIdentity: Equatable, Sendable {
     }
 }
 
-/// 认哪个进程注入的事件：按来源进程的可执行文件名认，本机的触控板、鼠标不是它发的
-public struct InjectedEventSource: Equatable, Sendable {
+/// 认哪个进程注入的事件：按来源进程的可执行文件名认，本机的触控板、鼠标不是它发的。
+/// 界面与被远程时注入的进程是同一个可执行文件时（同一份程序带不同启动参数），再加 `userData`：
+/// 有的远控给每个注入事件写一个固定的 eventSourceUserData，光看进程名分不出是谁发的
+public struct InjectedEventSource: Equatable, Sendable, CustomStringConvertible {
     public let executableName: String
+    /// 事件自带的 eventSourceUserData 必须等于它；nil = 不看这一个字段
+    public let userData: Int64?
 
-    public init(executableName: String) {
+    public init(executableName: String, userData: Int64? = nil) {
         self.executableName = executableName
+        self.userData = userData
     }
 
-    /// executablePath：事件来源进程的可执行文件路径，读不到时为空串
-    public func matches(executablePath: String) -> Bool {
-        (executablePath as NSString).lastPathComponent == executableName
+    /// executablePath：事件来源进程的可执行文件路径，读不到时为空串；userData：事件自带的 eventSourceUserData。
+    /// 补发的事件也被这里判过：调用方先放行自己补发的（TouchEvents.isReplay），再到这儿
+    public func matches(executablePath: String, userData: Int64) -> Bool {
+        guard (executablePath as NSString).lastPathComponent == executableName else { return false }
+        guard let expected = self.userData else { return true }
+        return expected == userData
+    }
+
+    /// 写进日志的写法：手势翻译开启时列出接管谁发来的，排查「手势没反应」先看这里
+    public var description: String {
+        userData.map { "\(executableName)（eventSourceUserData \($0)）" } ?? executableName
     }
 }
 

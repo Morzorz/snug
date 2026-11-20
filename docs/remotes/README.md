@@ -1,6 +1,6 @@
 # 接入新的远控
 
-Snug 只对接 UU远程，但对接的部分是一层可替换的适配器：核心不认识任何一家远控，接一家新的主要是加它自己的适配器，多数情况下端口不用改（例外见下文「不在端口里的」一段）。UU远程 的适配器是现成的样板，见 [UU远程 适配](uu.md)；为什么这样切、考虑过哪些方案，见 [设计记录](../remote-adapter/README.md)。
+Snug 对接 UU远程 与 RustDesk，对接的部分是一层可替换的适配器：核心不认识任何一家远控，接一家新的主要是加它自己的适配器，多数情况下端口不用改（例外见下文「不在端口里的」一段）。现成的样板：[UU远程 适配](uu.md)（读界面、盯系统日志）、[RustDesk 适配](rustdesk.md)（跟随自己写的日志文件、注入事件带标记）。为什么这样切、考虑过哪些方案，见 [设计记录](../remote-adapter/README.md)。
 
 ## 分层
 
@@ -25,31 +25,31 @@ Snug 只对接 UU远程，但对接的部分是一层可替换的适配器：核
 | `RemoteObservation` | 在不在场：只在有正面证据时为真；控制端：认不出为空；推流屏：不知道为 nil；信号快照：写进连入、断开日志 |
 | `RemoteAdapter` | 静态的 `identity`（身份属于这家远控，登记处、诊断命令、运行中的实例都从这里取）；`init()`；`start()`、`stop()`；`sample(wallClock:)` 每拍调一次 |
 
-不在端口里的：手势形态、屏幕让位、主屏策略、模式恢复、断开时序。这些按 UU远程 实测标定、各家暂时一样，留在共用代码里（[清单](uu.md#留在共用代码里的-uu-实测值)）；新的远控实测不同，改共用代码并补测试。注入事件目前只按进程名认：RustDesk 这类界面与服务同一个可执行文件的，要按别的特征认（RustDesk 是事件的 `eventSourceUserData`），得改核心的 `InjectedEventSource` 和系统层的 `InjectedEvents`（`TouchEvents.swift`）并补测试（见[设计记录](../remote-adapter/README.md#5-适配接口)，RustDesk 一行）。
+不在端口里的：手势形态、屏幕让位、主屏策略、模式恢复、断开时序。这些按 UU远程 实测标定、各家暂时一样，留在共用代码里（[清单](uu.md#留在共用代码里的-uu-实测值)）；新的远控实测不同，改共用代码并补测试。注入事件按来源进程的可执行文件名认，另可要求事件自带的 `eventSourceUserData` 等于某个值（`InjectedEventSource.userData`）：界面与被远程时的进程是同一个可执行文件的那种，靠它区分（RustDesk 见 [适配说明](rustdesk.md#身份)）。这两样都在端口里，接新的不用改核心。
 
 ## 步骤
 
-以 RustDesk 为例。名字只用英文字母，目录、目标、适配器类型、驱动都用它（门禁按 `Sources/Remotes` 下的目录名找）。
+以一家还没接的远控 `Demo` 为例。名字只用英文字母，目录、目标、适配器类型、驱动都用它（门禁按 `Sources/Remotes` 下的目录名找）。
 
-1. **目录**：`Sources/Remotes/RustDesk/Logic`（纯逻辑：信号怎么认、怎么算在场）、`Sources/Remotes/RustDesk/System`（调系统、实现 `RemoteAdapter`）、`Tests/Remotes/RustDesk`（纯逻辑的单测，至少一个文件：空目录进不了 git，别人克隆下来门禁会报目录对不上）
-2. **`Package.swift`**：照 UU 的写法加三个目标并写明 `path`：`RemoteRustDesk` 依赖 `SnugCore`；`RemoteRustDeskSystem` 依赖 `RemoteRustDesk`、`SnugCore`、`SnugSystem`；`RemoteRustDeskTests` 依赖 `RemoteRustDesk`、`SnugCore`。另外 `Snug` 依赖 `RemoteRustDeskSystem`，`RemoteContractTests` 依赖 `RemoteRustDesk`
+1. **目录**：`Sources/Remotes/Demo/Logic`（纯逻辑：信号怎么认、怎么算在场）、`Sources/Remotes/Demo/System`（调系统、实现 `RemoteAdapter`）、`Tests/Remotes/Demo`（纯逻辑的单测，至少一个文件：空目录进不了 git，别人克隆下来门禁会报目录对不上）
+2. **`Package.swift`**：照已有的写法加三个目标并写明 `path`：`RemoteDemo` 依赖 `SnugCore`；`RemoteDemoSystem` 依赖 `RemoteDemo`、`SnugCore`、`SnugSystem`；`RemoteDemoTests` 依赖 `RemoteDemo`、`SnugCore`。另外 `Snug` 依赖 `RemoteDemoSystem`，`RemoteContractTests` 依赖 `RemoteDemo`
 3. **适配器**：
-   - 纯逻辑只 import Foundation 和 SnugCore，内容是身份和信号映射。身份（`RemoteIdentity`）定义在这里，只此一份（UU 见 `UURemote.identity`），适配器和契约驱动都引用它
+   - 纯逻辑只 import Foundation 和 SnugCore，内容是身份和信号映射。身份（`RemoteIdentity`）定义在这里，只此一份（UU 见 `UURemote.identity`，RustDesk 见 `RustDeskRemote.identity`），适配器和契约驱动都引用它
    - 信号映射把原始信号变成 `RemoteObservation`（UU 见 `UUSignals.observation`）
-   - 系统部分实现 `RemoteAdapter`，类型叫 `RustDeskRemoteAdapter`，`static let identity` 指向纯逻辑里那份，另写 `package init() {}`
-   - 注入事件的进程和自家界面是同一个可执行文件时（RustDesk 就是），先照上文「不在端口里的」一段改核心和系统层
+   - 系统部分实现 `RemoteAdapter`，类型叫 `DemoRemoteAdapter`，`static let identity` 指向纯逻辑里那份，另写 `package init() {}`
+   - 注入事件的进程和自家界面是同一个可执行文件时，给 `InjectedEventSource` 加 `userData`（端口里已有这个字段，不用改核心）
    - 内部类型用 `package`，不用 `public`
-4. **登记**：`Sources/Snug/App/Remotes.swift` import `RemoteRustDeskSystem`，`all` 加一行 `Entry(adapter: RustDeskRemoteAdapter.self, dump: …, check: …)`，`dump`、`check` 是 `--dump-remote`、`--check-remote` 的实现（UU 见 `UUDump.run`、`UUCheckRun.run`）。登记顺序即两家同时报在场时的归属顺序
-5. **契约测试**：`Tests/RemoteContractTests/Drivers/RustDeskDriver.swift`，照 `UUDriver` 实现 `RemoteDriver`（协议在 `RemoteDriver.swift`），把空闲、读不到、连入、推流几种情形翻译成它的原始信号，经它自己的映射交出观测；放进同一文件里的 `drivers`
+4. **登记**：`Sources/Snug/App/Remotes.swift` import `RemoteDemoSystem`，`all` 加一行 `Entry(adapter: DemoRemoteAdapter.self, dump: …, check: …)`，`dump`、`check` 是 `--dump-remote`、`--check-remote` 的实现（UU 见 `UUDump.run`、`UUCheckRun.run`，RustDesk 见 `RustDeskDump.run`、`RustDeskCheckRun.run`）。登记顺序即几家同时报在场时的归属顺序
+5. **契约测试**：`Tests/RemoteContractTests/Drivers/DemoDriver.swift`，照 `UUDriver`、`RustDeskDriver` 实现 `RemoteDriver`（协议在 `RemoteDriver.swift`），把空闲、读不到、连入、推流几种情形翻译成它的原始信号，经它自己的映射交出观测；放进 `RemoteDriver.swift` 里的 `drivers`
 6. **验收**：
    - `scripts/snug check` 全绿
-   - `swift build && "$(swift build --show-bin-path)/Snug" --dump-remote rustdesk`（日志名，大小写都行），看读得到信号
+   - `swift build && "$(swift build --show-bin-path)/Snug" --dump-remote demo`（日志名，大小写都行），看读得到信号
    - `scripts/snug install` 装上带适配器的版本。没有 Developer ID 证书时用 ad-hoc 签名，每次重新构建都要重新授权辅助功能（见[开发文档](../development.md#构建与发布)）
    - 真机连一次，`~/Library/Logs/Snug.log` 里连入、会话、建屏、断开、撤屏几行对得上
 
 ## 提交
 
-- **合进本仓库**：提 PR，写明接的是哪家远控、哪个版本，附 `scripts/snug check` 的结果和一次真机连接的 Snug.log 片段（连入到撤屏）；照 [uu.md](uu.md) 写一份 `docs/remotes/<名字小写>.md`（身份、信号、兼容自检、共用实测值是否相同）。作者只用 UU远程，别家的真机验证靠提交者
+- **合进本仓库**：提 PR，写明接的是哪家远控、哪个版本，附 `scripts/snug check` 的结果和一次真机连接的 Snug.log 片段（连入到撤屏）；照 [uu.md](uu.md) 或 [rustdesk.md](rustdesk.md) 写一份 `docs/remotes/<名字小写>.md`（身份、信号、兼容自检、共用实测值是否相同）。作者只用 UU远程 与 RustDesk，别家的真机验证靠提交者
 - **自己维护**：fork 后照上面的步骤接；MIT 许可，保留 LICENSE 里的版权声明即可
 
 ## 几家并存

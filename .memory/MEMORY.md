@@ -9,9 +9,10 @@
 - [发版](project-release.md) — 只走 scripts/snug；个人 Developer ID（29898YBGWD）公证；gh 绑定 zephyr4123 并写明 -R；版本号与更新日志口径；发版后不替主人装
 - [国内源与 README](project-domestic-mirror.md) — dl.zephyrxiang.com/snug/；看下载量；证书 2027-01-12 到期；README 结构、截图规格、camo 的坑
 - [演示录制（进行中）](project-demo-recording.md) — 三块屏原画并排，正式素材和粗剪已就绪；全在 footage/（绝不进 git），主人说交接时才交给 kineto
-- [UU远程 VIP 与横向扩展](project-uu-vip.md) — 12-01 起多屏、虚拟屏纳入 VIP：对外立场、免费版不实测；11-19 定专注 UU、暂不接 RustDesk 等其他远控
+- [UU远程 VIP 与横向扩展](project-uu-vip.md) — 12-01 起多屏、虚拟屏纳入 VIP：对外立场、免费版不实测；11-19「暂不接其他远控」已作废（见 RustDesk 那条），README 立场待改
 - [无显示器的 Mac（issue #8，已关）](project-headless-mac.md) — 手机屏会顶掉默认屏；退出入口已发布，替身主屏方案已定、缺实机验证
 - [多屏](project-multi-screen.md) — 三条原则、拍板、UU 与 macOS 实测、没做完的、还欠着的对外承诺；设计记录在 git 历史里
+- [RustDesk 适配（11-20 落地）](project-rustdesk.md) — 信号只有一份日志、注入按 userData 100 认、1.5.3 日志少了 width；真机三条未验证、README 立场待定
 - [远控适配层（11-19 合入）](project-remote-adapter.md) — 对接 UU 的部分可替换、给社区留口子；设计记录 docs/remote-adapter 保留；约定、门禁、技术债
 - [界面原型与令牌](project-ui-redesign.md) — 界面以 design/prototype 为准、令牌在 design/design-tokens.json；先改原型再改代码
 - [产品思维](feedback-product-thinking.md) — 用户无感、可选不强制、隔离干净；验证用的步骤不进产品；不为了做而做

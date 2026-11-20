@@ -49,12 +49,17 @@ struct RemoteContractTests {
     @Test("注入事件：认它自己注入的进程；本机的事件、Snug 自己的进程、别家远控的注入进程都不认", arguments: drivers)
     func injectedEvents(driver: any RemoteDriver) {
         let injector = driver.identity.injector
-        #expect(injector.matches(executablePath: driver.injectorPath))
-        #expect(!injector.matches(executablePath: ""))
-        #expect(!injector.matches(executablePath: "/System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer"))
-        #expect(!injector.matches(executablePath: "/Applications/Snug.app/Contents/MacOS/Snug"))
+        // 事件自带的 eventSourceUserData：没指定时填什么都行，指定了就必须对上
+        let userData = injector.userData ?? 0
+        #expect(injector.matches(executablePath: driver.injectorPath, userData: userData))
+        #expect(!injector.matches(executablePath: "", userData: userData))
+        #expect(!injector.matches(executablePath: "/System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer", userData: userData))
+        #expect(!injector.matches(executablePath: "/Applications/Snug.app/Contents/MacOS/Snug", userData: 0x534E_5547))
+        if injector.userData != nil {
+            #expect(!injector.matches(executablePath: driver.injectorPath, userData: userData == 0 ? 1 : 0))
+        }
         for other in drivers where other.identity != driver.identity {
-            #expect(!injector.matches(executablePath: other.injectorPath))
+            #expect(!injector.matches(executablePath: other.injectorPath, userData: other.identity.injector.userData ?? 0))
         }
     }
 
