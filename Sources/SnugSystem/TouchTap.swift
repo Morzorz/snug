@@ -16,6 +16,8 @@ public final class TouchTap {
     private let injectors: [InjectedEventSource]
     /// 手机上点了屏上那个窗口的关闭按钮（核对过、点击已经吞掉了），交回窗口编号：在主线程上调
     public var onCloseWindow: ((UInt32) -> Void)?
+    /// 点按反馈：手指位置、实际落点、吸附到的控件框（没吸附为 nil）。在监听线程上回调，主线程画
+    public var onTapFeedback: (@Sendable (CGPoint, CGPoint, CGRect?) -> Void)?
 
     public init(injectors: [InjectedEventSource]) {
         self.injectors = injectors
@@ -35,7 +37,8 @@ public final class TouchTap {
     /// 起监听线程，等它报告监听建没建成
     private func start() -> Bool {
         guard session == nil else { return true }
-        let next = TapSession(regions: regions, injectors: injectors) { [weak self] window in
+        let feedback = onTapFeedback
+        let next = TapSession(regions: regions, injectors: injectors, feedback: feedback) { [weak self] window in
             DispatchQueue.main.async { MainActor.assumeIsolated { self?.onCloseWindow?(window) } }
         }
         guard next.start() else {
@@ -43,7 +46,7 @@ public final class TouchTap {
             return false
         }
         session = next
-        Log.info("手势翻译已开启（只接管 \(injectors.map(\.executableName).joined(separator: "、")) 发来、在 Snug 屏里的操作）")
+        Log.info("手势翻译已开启（只接管 \(injectors.map(\.description).joined(separator: "、")) 发来、在 Snug 屏里的操作）")
         return true
     }
 
@@ -59,6 +62,8 @@ public final class TouchTap {
 private final class TapSession: @unchecked Sendable {
     private let regions: OSAllocatedUnfairLock<[TouchRegion]>
     private let closeWindow: @Sendable (UInt32) -> Void
+    /// 点按反馈：手指位置、落点、吸附到的控件框
+    private let feedback: (@Sendable (CGPoint, CGPoint, CGRect?) -> Void)?
     /// 监听线程的 run loop：start 等它建好才返回，之后只读
     private var runLoop: CFRunLoop?
 
@@ -68,12 +73,33 @@ private final class TapSession: @unchecked Sendable {
     private var heldPress: CGEvent?
     private var coastTimer: CFRunLoopTimer?
     private var injected: InjectedEvents
+    /// 有的远控把手指滑动发成「不按键的移动」、点按发成单独一个抬起（RustDesk 触摸模式实测）。
+    /// 这里把移动当手指轨迹，合成翻译器认识的按下/拖动/抬起；原事件吞掉，光标不再跟着手指跑。
+    /// 见过真正的左键拖动（UU 那类）就别对接，免得同一根手指算两遍
+    private var finger: CGPoint?
+    private var fingerStarted = false
+    private var fingerStartedAt: TimeInterval = 0
+    /// 这次手势已经滚过：按住不动才取消，滚动过的照常收尾
+    private var fingerScrolled = false
+    private var fingerLastMove: TimeInterval = 0
+    private var lastDragAt: TimeInterval = -10
+    private var fingerTimer: CFRunLoopTimer?
+    /// 远控自己处理了长按右键，这一小段时间里来的左键抬起不要补点击（会把刚弹出的菜单点掉）
+    private var suppressUntil: TimeInterval = 0
+
+    /// 手指停这么久算这一次手势结束（远控只在移动时发事件，停手就没有后续了）。
+    /// 要比长按阈值长：按住不动是在等右键菜单，不能提前当成点击
+    private static let fingerIdle: TimeInterval = 0.6
+    /// 这么久内出现过真正的左键拖动，就不把移动当手指轨迹
+    private static let dragQuiet: TimeInterval = 1.5
     /// 这一下按在哪块范围里：之后的拖动、抬起跟着这一下走，手指滑出范围也一样
     private var pressed: TouchRegion?
 
-    init(regions: OSAllocatedUnfairLock<[TouchRegion]>, injectors: [InjectedEventSource], closeWindow: @escaping @Sendable (UInt32) -> Void) {
+    init(regions: OSAllocatedUnfairLock<[TouchRegion]>, injectors: [InjectedEventSource],
+         feedback: (@Sendable (CGPoint, CGPoint, CGRect?) -> Void)?, closeWindow: @escaping @Sendable (UInt32) -> Void) {
         self.regions = regions
         injected = InjectedEvents(injectors: injectors)
+        self.feedback = feedback
         self.closeWindow = closeWindow
     }
 
@@ -102,6 +128,7 @@ private final class TapSession: @unchecked Sendable {
                 CFMachPortInvalidate(tap)
             }
             tap = nil
+            finishFinger(at: nil, now: ProcessInfo.processInfo.systemUptime)
             stopCoasting()
             heldPress = nil
             CFRunLoopStop(CFRunLoopGetCurrent())
@@ -131,26 +158,156 @@ private final class TapSession: @unchecked Sendable {
             Log.warn("手势翻译的事件监听被系统停用（\(type == .tapDisabledByTimeout ? "回调超时" : "用户输入")），已重新开启")
             return pass
         }
-        guard let kind = TouchEvents.kind(of: type), !TouchEvents.isReplay(event), injected.contains(event) else { return pass }
+        let now = ProcessInfo.processInfo.systemUptime
+        if TouchEvents.isReplay(event) { return pass }
+        guard injected.contains(event) else { return pass }
 
-        let input = TouchInput(kind, at: event.location, time: ProcessInfo.processInfo.systemUptime)
+        if type == .mouseMoved {
+            return followFinger(event, now: now)
+        }
+        if type == .rightMouseDown || type == .rightMouseUp {
+            // 远控自己把长按变成了右键：这一次手势让给它，Snug 不再补点击、也不自己再点一次右键。
+            // 菜单就开在手指下面，它随后那个左键事件（按在同一个点上）会点中菜单项，要一并让开
+            discardFinger(now: now)
+            return pass
+        }
+        guard let kind = TouchEvents.kind(of: type) else { return pass }
+        if kind == .drag { lastDragAt = now }
+        // 合成的手势进行中：远控真实的按下（坐标多半是滞后的）不要打断轨迹
+        if fingerStarted {
+            if kind == .release { finishFinger(at: event.location, now: now) }
+            return nil
+        }
+
+        // 刚让位给远控的右键：跟着来的左键抬起不要点（会把菜单点掉）
+        if kind == .release, now < suppressUntil { return nil }
+
+        // 有的远控点按只发一个抬起、不发按下（RustDesk 触摸模式实测）：按它给的位置补一次干净的点击
+        if kind == .release, pressed == nil, !fingerStarted {
+            let point = event.location
+            guard regions.withLock({ $0 }).contains(where: { $0.frame.contains(point) }) else { return pass }
+            tap(at: point, now: now)
+            return nil
+        }
+
+        let input = TouchInput(kind, at: event.location, time: now)
         if kind == .press { pressed = regions.withLock { $0 }.first { $0.frame.contains(event.location) } }
+        let response = translate(input, current: event)
+        return response.passOriginal ? pass : nil
+    }
+
+    /// 在这一点上合成一次点击：先按下、再抬起，走翻译器的点击那条路（连击计数、关闭按钮都不落下）
+    private func tap(at raw: CGPoint, now: TimeInterval) {
+        let snap = TapSnapper.snap(raw)
+        feedback?(raw, snap.point, snap.control)
+        let point = snap.point
+        pressed = regions.withLock { $0 }.first { $0.frame.contains(point) }
+        _ = translate(TouchInput(.press, at: point, time: now), current: synthetic(.leftMouseDown, at: point))
+        _ = translate(TouchInput(.release, at: point, time: now + 0.05), current: synthetic(.leftMouseUp, at: point))
+        pressed = nil
+    }
+
+    /// 不按键的移动：当作手指轨迹。落在某块范围里就自己起一次手势（按下 → 拖动…），
+    /// 停手 fingerIdle 之后按「抬起」收尾；出了范围也收尾。原事件吞掉，光标留在原处
+    private func followFinger(_ event: CGEvent, now: TimeInterval) -> Unmanaged<CGEvent>? {
+        let pass = Unmanaged.passUnretained(event)
+        guard now >= suppressUntil else { return nil }
+        guard now - lastDragAt >= Self.dragQuiet else { return pass }
+        let point = event.location
+        guard let region = regions.withLock({ $0 }).first(where: { $0.frame.contains(point) }) else {
+            finishFinger(at: nil, now: now)
+            return pass
+        }
+        finger = point
+        fingerLastMove = now
+        pressed = region
+        if fingerStarted {
+            // 喂给翻译器的必须是真正的拖动事件：补发时按它的类型重建，移动事件补出去不会是拖动
+            _ = translate(TouchInput(.drag, at: point, time: now), current: synthetic(.leftMouseDragged, at: point))
+        } else {
+            fingerStarted = true
+            fingerStartedAt = now
+            fingerScrolled = false
+            // 按下时吸附一次：手指盖住的面积大，点在按钮边上也算点到它
+            let snap = TapSnapper.snap(point)
+            feedback?(point, snap.point, snap.control)
+            _ = translate(TouchInput(.press, at: snap.point, time: now), current: synthetic(.leftMouseDown, at: snap.point))
+        }
+        armFingerTimer()
+        return nil
+    }
+
+    /// 收尾：按手指最后的位置给翻译器一个抬起，点击、右键、滚动都在这一步定下来
+    private func finishFinger(at point: CGPoint?, now: TimeInterval) {
+        guard fingerStarted else { return }
+        fingerStarted = false
+        stopFingerTimer()
+        // 按住不动：右键由远控自己发（实测 RustDesk 触摸模式会发 rdown/rup）。Snug 不再补，
+        // 否则菜单刚出来就被自己这一下点中某一项。滚动过的手势不算长按，照常收尾
+        if !fingerScrolled, now - fingerStartedAt >= TouchTranslator.holdDuration {
+            discardFinger(now: now)
+            return
+        }
+        let end = point ?? finger ?? .zero
+        _ = translate(TouchInput(.release, at: end, time: now), current: synthetic(.leftMouseUp, at: end))
+        finger = nil
+        pressed = nil
+    }
+
+    /// 这一次合成手势作废：远控自己处理了（比如长按右键），Snug 不补任何事件，翻译器重来
+    private func discardFinger(now: TimeInterval) {
+        fingerStarted = false
+        stopFingerTimer()
+        translator = TouchTranslator()
+        heldPress = nil
+        finger = nil
+        pressed = nil
+        fingerScrolled = false
+        suppressUntil = now + 1.2
+    }
+
+    /// 喂翻译器并按它说的做：吞事件、补发按下、右键、滚动
+    @discardableResult
+    private func translate(_ input: TouchInput, current: CGEvent?) -> TouchResponse {
         let region = pressed
         let response = translator.handle(input, in: region)
-        if kind == .press, !response.passOriginal { heldPress = event.copy() }
-        response.commands.forEach { perform($0, current: event, region: region) }
-        if kind == .release { heldPress = nil }
+        if input.kind == .press, !response.passOriginal { heldPress = current?.copy() }
+        if response.commands.contains(where: { if case .scroll = $0 { true } else { false } }) { fingerScrolled = true }
+        if let current { response.commands.forEach { perform($0, current: current, region: region) } }
+        if input.kind == .release { heldPress = nil }
         if translator.isCoasting { startCoasting() }
-        return response.passOriginal ? pass : nil
+        return response
+    }
+
+    /// 按类型在这一点上造一个左键事件（源留空：记号由 TouchEvents.replay 写在它自己的源上）
+    private func synthetic(_ type: CGEventType, at point: CGPoint) -> CGEvent? {
+        CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: point, mouseButton: .left)
+    }
+
+    private func armFingerTimer() {
+        stopFingerTimer()
+        // 滚动过的手势不用等长按那么久：停手就是停手，惯性早点接上
+        let idle = fingerScrolled ? 0.12 : Self.fingerIdle
+        let timer = CFRunLoopTimerCreateWithHandler(nil, CFAbsoluteTimeGetCurrent() + idle, 0, 0, 0) { [self] _ in
+            finishFinger(at: nil, now: ProcessInfo.processInfo.systemUptime)
+        }
+        fingerTimer = timer
+        CFRunLoopAddTimer(CFRunLoopGetCurrent(), timer, .commonModes)
+    }
+
+    private func stopFingerTimer() {
+        guard let timer = fingerTimer else { return }
+        CFRunLoopTimerInvalidate(timer)
+        fingerTimer = nil
     }
 
     private func perform(_ command: TouchCommand, current: CGEvent, region: TouchRegion?) {
         switch command {
         case .replayPress:
-            TouchEvents.post(heldPress)
+            TouchEvents.post(heldPress.flatMap(TouchEvents.replay))
             heldPress = nil
         case .replayCurrent:
-            TouchEvents.post(current.copy())
+            TouchEvents.post(TouchEvents.replay(current))
         case .rightClick(let point):
             TouchEvents.rightClick(at: point).forEach(TouchEvents.post)
         case .scroll(let step):

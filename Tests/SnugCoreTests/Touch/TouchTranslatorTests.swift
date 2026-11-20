@@ -246,4 +246,22 @@ struct TouchTranslatorTests {
             #expect(t.isCoasting == coasts)
         }
     }
+
+    @Test("快滑成批到达：第一下就跳很远、时间也过了 0.5 秒，照样是滚动，不当长按选择")
+    func batchedFastSwipeScrolls() {
+        var t = TouchTranslator()
+        #expect(t.handle(input(.press, 100, 600, 0), in: phone).passOriginal == false)
+        // 手指早抬了，事件 0.6 秒后才到，一跳 150 点
+        let r = t.handle(input(.drag, 250, 600, 0.6), in: phone)
+        #expect(r.commands.contains { if case .scroll = $0 { true } else { false } })
+        #expect(!r.commands.contains(.replayPress))
+    }
+
+    @Test("真按住不动再拖：仍在阈值边上一小步，是选择（补发按下后照旧拖动）")
+    func realHoldThenDragSelects() {
+        var t = TouchTranslator()
+        #expect(t.handle(input(.press, 100, 600, 0), in: phone).passOriginal == false)
+        #expect(t.handle(input(.drag, 112, 600, 0.6), in: phone)
+            == TouchResponse(passOriginal: false, commands: [.replayPress, .replayCurrent]))
+    }
 }

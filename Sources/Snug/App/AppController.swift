@@ -36,6 +36,8 @@ final class AppController: Sendable {
     private var lastVerifyAt = Date.distantPast
     /// 手势翻译此刻覆盖哪几块屏：变了才记日志
     private var gestureScreens: Set<ScreenID> = []
+    /// 已经在上面藏起系统光标的屏：断开、撤屏、换屏时按这个配对恢复
+    private var hiddenCursorScreens: [ScreenID: DisplayID] = [:]
     /// 单调时钟的起点：系统改时间不会让「已经过了多久」算错
     private let anchor = (date: Date(), uptime: ProcessInfo.processInfo.systemUptime)
 
@@ -50,6 +52,11 @@ final class AppController: Sendable {
                         arrangement: DisplayArrangementService(), paths: paths, defaultZoom: store.config.zoomSteps)
         catalog = AppCatalog(apps: apps, windows: windows, excluding: Set(remotes.flatMap(\.identity.bundleIDs)))
         touch = TouchTap(injectors: remotes.map(\.identity.injector))
+        touch.onTapFeedback = { finger, target, control in
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated { TapFeedback.shared.show(finger: finger, target: target, control: control) }
+            }
+        }
         state.config = store.config
         state.previewing = preview
         state.devices = devices
@@ -127,6 +134,8 @@ final class AppController: Sendable {
         tickTimer = nil
         watcher?.stop()
         remotes.forEach { $0.stop() }
+        hiddenCursorScreens.forEach { Cursor.show($0.value) }
+        hiddenCursorScreens.removeAll()
     }
 
     // MARK: 每拍
@@ -141,6 +150,7 @@ final class AppController: Sendable {
         screenshots.expire()
         let wallClock = Date()
         handle(session.update(remotes.map { RemoteReading(remote: $0.identity, observation: $0.sample(wallClock: wallClock)) }, now: now))
+        syncCursorVisibility()
         keepPointerOffSnugScreens()
         if now.timeIntervalSince(lastVerifyAt) >= Self.verifyInterval {
             lastVerifyAt = now
@@ -241,6 +251,25 @@ final class AppController: Sendable {
             Log.info("手势翻译范围：\(ids.isEmpty ? "没有屏" : names)\(why)")
         }
         state.update(\.gesturesFailed, !touch.setRegions(covered.map(\.region)))
+    }
+
+    /// 触摸屏上没有鼠标箭头：远控把系统光标画进画面时，手机上会多一个小箭头。
+    /// 只在远程连着、屏在的时候藏，断开或撤屏马上恢复；物理屏不动
+    private func syncCursorVisibility() {
+        var wanted: [ScreenID: DisplayID] = [:]
+        if session.isConnected {
+            for (id, desk) in state.desks.desks where desk.behavior.touch {
+                if let display = desk.display { wanted[id] = display }
+            }
+        }
+        for (id, display) in hiddenCursorScreens where wanted[id] != display {
+            Cursor.show(display)
+            hiddenCursorScreens[id] = nil
+        }
+        for (id, display) in wanted where hiddenCursorScreens[id] == nil {
+            Cursor.hide(display)
+            hiddenCursorScreens[id] = display
+        }
     }
 
     private func screenName(_ id: ScreenID) -> String {

@@ -13,6 +13,18 @@ public enum Cursor {
         move(point, keepingOut: gone)
     }
 
+    /// 在这块屏上藏起系统光标：远控把光标画进画面时，手机上看不到那个小箭头。按屏计数，和 show 配对
+    public static func hide(_ id: DisplayID) {
+        CGDisplayHideCursor(id)
+        Log.info("屏 #\(id) 上藏起系统光标（触摸屏上不显示箭头）")
+    }
+
+    /// 把这块屏上的系统光标放回来
+    public static func show(_ id: DisplayID) {
+        CGDisplayShowCursor(id)
+        Log.info("屏 #\(id) 上恢复系统光标")
+    }
+
     private static func move(_ point: CGPoint, keepingOut gone: DisplayID) {
         let kept = (Screens.online() ?? []).filter { $0 != gone }.map { CGDisplayBounds($0) }
         let mainID = CGMainDisplayID()

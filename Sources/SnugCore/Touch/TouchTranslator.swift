@@ -167,8 +167,12 @@ public struct TouchTranslator: Sendable {
         case .idle, .selecting:
             return .pass
         case .pending(let since):
-            guard distance(input.location, origin) >= Self.slop * scale else { return .swallow() }
-            if input.time - since >= Self.holdDuration {
+            let moved = distance(input.location, origin)
+            guard moved >= Self.slop * scale else { return .swallow() }
+            // 按住 0.5 秒再拖 = 选择。但事件经网络成批到达时「按住多久」会被算长：一次快滑的第一条拖动
+            // 可能一跳就是几百点，且时间已过 0.5 秒。跳得远超阈值的一律按滑动处理，不按选择（远程实测：
+            // 手机上快滑被当成拖动选中文字，就是这个）
+            if input.time - since >= Self.holdDuration, moved < Self.slop * scale * 4 {
                 // 按住后再拖：补发按下，接下来照旧拖动，就是原来的选择
                 phase = .selecting
                 return .swallow([.replayPress, .replayCurrent])
